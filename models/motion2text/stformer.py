@@ -61,7 +61,7 @@ class STformer(nn.Module):
             [TDecoder(model_dim, num_heads, dropout, ff_dim, swiglu=swiglu) for _ in range(num_layers)]
         )
 
-        self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=3, dropout=dropout)
+        # self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=3, dropout=dropout)
         
         # Projection layer to map decoder output to target vocabulary size
         self.projection = FeedForward(model_dim, tgt_vocab_size, tgt_vocab_size, swiglu=swiglu)
