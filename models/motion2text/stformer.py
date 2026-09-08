@@ -87,21 +87,21 @@ class STformer(nn.Module):
 
         Returns
         -------
-        returns source and target masks
+        returns source mask, target mask, and target padding mask
         """
         # Source mask
         src_mask = (src != pad_token_id)  # (batch_size, src_seq_len)
 
-        tgt_mask = None
+        tgt_mask, tgt_pad_mask = None, None
         if tgt is not None:
             seq_len = tgt.size(1)
             # Target mask
-            tgt_pad_mask = (tgt != pad_token_id)  # (batch_size, tgt_seq_len)
+            tgt_pad_mask = (tgt != pad_token_id).unsqueeze(1)  # (batch_size, 1, tgt_seq_len)
             tgt_sub_mask = torch.tril(torch.ones((seq_len, seq_len), device=tgt.device, dtype=torch.bool))  # (tgt_seq_len, tgt_seq_len)
             tgt_mask = tgt_pad_mask & tgt_sub_mask  # (batch_size, 1, tgt_seq_len, tgt_seq_len)
             # tgt_pad_mask = (tgt != 0)  # (batch_size, tgt_seq_len)
 
-        return src_mask, tgt_mask
+        return src_mask, tgt_mask, tgt_pad_mask.squeeze(1) if tgt_pad_mask is not None else None
 
 
     def forward(self,
@@ -126,7 +126,7 @@ class STformer(nn.Module):
         torch.Tensor
             Predicted description sequence of shape (batch, tgt_vocab_size).
         """
-        src_mask, _ = self.generate_mask(src, tgt=None)
+        src_mask, _, _ = self.generate_mask(src, tgt=None)
         src_mask = encoder_attn_mask if encoder_attn_mask is not None else src_mask
 
         # Embedding and positional encoding
@@ -153,7 +153,7 @@ class STformer(nn.Module):
 
         if tgt is not None:
             # Training path
-            _, tgt_mask = self.generate_mask(src, tgt)
+            _, tgt_mask, tgt_pad_mask = self.generate_mask(src, tgt)
 
             tgt_emb = self.deco_embedding(tgt)
             tgt_emb = self.pos_embedding(tgt_emb)
@@ -170,7 +170,7 @@ class STformer(nn.Module):
 
             # --- Masked Mean for Text Embeddings ---
             text_embeddings = decoder_output.squeeze(2)  # (B, T, model_dim)
-            text_embeddings = global_mean_pooling(text_embeddings, mask=tgt_mask)  # (B, model_dim)
+            text_embeddings = global_mean_pooling(text_embeddings, mask=tgt_pad_mask)  # (B, model_dim)
 
         else:
             # Inference path

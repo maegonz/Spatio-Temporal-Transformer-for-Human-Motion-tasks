@@ -114,10 +114,15 @@ class SpatioTemporalAttention(nn.Module):
                     attn_mask = mask.view(batch_size * seq_len, 1, 1, 1)
                     attn_mask = attn_mask.expand(-1, 1, num_joints, num_joints).contiguous()
                 else:
-                    # [B, S] -> [B * J, 1, S, S]
-                    attn_mask = mask.unsqueeze(1).unsqueeze(1) # [B, 1, 1, S]
-                    attn_mask = attn_mask.repeat_interleave(num_joints, dim=0) # [B * J, 1, 1, S]
-                    attn_mask = attn_mask.expand(-1, 1, seq_len, seq_len).contiguous()
+                    if mask.dim() == 3:
+                        # [B, S, S] -> [B * J, 1, S, S]
+                        attn_mask = mask.unsqueeze(1) # [B, 1, S, S]
+                        attn_mask = attn_mask.repeat_interleave(num_joints, dim=0) # [B * J, 1, S, S]
+                    else:
+                        # [B, S] -> [B * J, 1, S, S]
+                        attn_mask = mask.unsqueeze(1).unsqueeze(1) # [B, 1, 1, S]
+                        attn_mask = attn_mask.repeat_interleave(num_joints, dim=0) # [B * J, 1, 1, S]
+                        attn_mask = attn_mask.expand(-1, 1, seq_len, seq_len).contiguous()
 
             atten_output = F.scaled_dot_product_attention(
                 q, k, v, 

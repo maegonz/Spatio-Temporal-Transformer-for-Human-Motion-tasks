@@ -79,7 +79,7 @@ def training(model: nn.Module,
             encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
 
             with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
-                outputs = model(motion, captions_tokens, encoder_attn_mask=encoder_attn_mask, prefix_ids=prefix_ids)
+                outputs = model(motion, captions_tokens, encoder_attn_mask=encoder_attn_mask)
 
                 motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
 
