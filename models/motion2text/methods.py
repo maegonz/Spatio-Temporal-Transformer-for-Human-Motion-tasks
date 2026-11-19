@@ -78,17 +78,22 @@ def training(model: nn.Module,
             captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
             encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
 
+            # decoder input = start token and labels shifted
+            labels = captions_tokens
+            start = torch.zeros_like(labels[:, :1])
+            decoder_input = torch.cat([start, labels[:, :-1]], dim=1)
+
             with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
-                outputs = model(motion, captions_tokens, encoder_attn_mask=encoder_attn_mask)
+                outputs = model(motion, decoder_input, encoder_attn_mask=encoder_attn_mask)
 
                 motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
 
-                ce_loss = outputs["loss"] if outputs["loss"] is not None else cross_entropy_loss(outputs["decoder_output"], captions_tokens, pad_token_id)
+                ce_loss = cross_entropy_loss(outputs["decoder_output"], labels, pad_token_id)
                 cl_loss = contrastive_loss(motion_features, text_features)
 
                 # Combine them (lambda is a hyperparameter, start with 0.1)
                 loss = ce_loss + (alpha * cl_loss)
-
+        
             optimizer.zero_grad(set_to_none=True)
 
             scaler.scale(loss).backward()
@@ -100,9 +105,9 @@ def training(model: nn.Module,
         epoch_loss = running_loss.item() / len(train_loader.dataset)
         train_losses.append(epoch_loss)
 
-        if val_loader is not None:
+        if (val_loader is not None) and ((epoch+1) % 25 == 0):
             val_scores = validation(
-                model, val_loader, device, use_amp
+                model, val_loader, device, use_amp=use_amp
             )
             val_metrics.append(val_scores)
 
@@ -118,11 +123,11 @@ def training(model: nn.Module,
 from ..metrics import Evaluator
 from .transformers.blocks import TextTokenizer
 
+@torch.no_grad()
 def validation(model: nn.Module, 
                val_loader: DataLoader,
                device: torch.device,
-               tokenizer: TextTokenizer,
-               prefix_ids: torch.Tensor,
+               tokenizer=TextTokenizer('t5-small'),
                use_amp: bool = True):
     """
     Evaluate a PyTorch model on a dataset with optional AMP.
@@ -155,23 +160,23 @@ def validation(model: nn.Module,
     model.eval()
     evaluator = Evaluator()
     metrics_scores = []
+    all_references = []
+    all_generated = []
 
-    with torch.no_grad():
-        for item in val_loader:
-            all_references = []
-            all_generated = []
-            motion = item['motion'].to(device, non_blocking=True)
-            captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
-            encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
-            captions = item['captions']
+    for k, item in enumerate(val_loader):
+        motion = item['motion'].to(device, non_blocking=True)
+        encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
+        captions = item['captions']
 
-            with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
-                outputs_ids = model(motion, captions_tokens, encoder_attn_mask=encoder_attn_mask, generation=True, prefix_ids=prefix_ids)
-                outputs = tokenizer.batch_decode(outputs_ids, skip_special_tokens=True)
+        with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
+            outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask)
+            logits = outputs_ids["decoder_output"]
+            texts = tokenizer.batch_decode(logits, skip_special_tokens=True)
 
-            all_references.extend(captions)
-            all_generated.extend(outputs)
-            scores = evaluator.compute_metrics(all_references, all_generated)
-            metrics_scores.append(scores)
+        all_references.extend(captions)
+        all_generated.extend(texts)
+
+    scores = evaluator.compute_metrics(all_references, all_generated)
+    metrics_scores.append(scores)
 
     return metrics_scores

@@ -64,7 +64,7 @@ class STformer(nn.Module):
         # self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=3, dropout=dropout)
         
         # Projection layer to map decoder output to target vocabulary size
-        self.projection = FeedForward(model_dim, tgt_vocab_size, tgt_vocab_size, swiglu=swiglu)
+        self.projection = FeedForward(model_dim, tgt_vocab_size, ff_dim, swiglu=swiglu)
         self.dropout = nn.Dropout(dropout)
 
     def generate_mask(self, 
@@ -94,14 +94,15 @@ class STformer(nn.Module):
 
         tgt_mask, tgt_pad_mask = None, None
         if tgt is not None:
-            seq_len = tgt.size(1)
+            B, seq_len = tgt.shape
             # Target mask
-            tgt_pad_mask = (tgt != pad_token_id).unsqueeze(1)  # (batch_size, 1, tgt_seq_len)
-            tgt_sub_mask = torch.tril(torch.ones((seq_len, seq_len), device=tgt.device, dtype=torch.bool))  # (tgt_seq_len, tgt_seq_len)
-            tgt_mask = tgt_pad_mask & tgt_sub_mask  # (batch_size, 1, tgt_seq_len, tgt_seq_len)
-            # tgt_pad_mask = (tgt != 0)  # (batch_size, tgt_seq_len)
+            tgt_pad_mask = (tgt != pad_token_id) # (batch_size, tgt_seq_len)
+            tgt_pad_mask[:, 0] = True
+            causal = torch.tril(torch.ones((seq_len, seq_len), device=tgt.device, dtype=torch.bool))  # (tgt_seq_len, tgt_seq_len)
+            tgt_mask = causal.unsqueeze(0).expand(B, -1, -1)  # (B, 1, tgt_seq_len, tgt_seq_len)
 
-        return src_mask, tgt_mask, tgt_pad_mask.squeeze(1) if tgt_pad_mask is not None else None
+        return src_mask, tgt_mask, tgt_pad_mask if tgt_pad_mask is not None else None
+        # return src_mask, tgt_mask, tgt_pad_mask.squeeze(1) if tgt_pad_mask is not None else None
 
 
     def forward(self,
@@ -229,9 +230,13 @@ class STformer(nn.Module):
             tgt_emb = self.pos_embedding(tgt_emb)
             tgt_emb = self.dropout(tgt_emb)
 
+            B, L = generated_ids.shape
+            causal = torch.tril(torch.ones((L,L), device=generated_ids.device, dtype=torch.bool))
+            causal = causal.unsqueeze(0).expand(B, -1, -1)
+        
             decoder_output = tgt_emb
             for decoder in self.decoder:
-                decoder_output = decoder(decoder_output, encoder_output, src_mask, None)
+                decoder_output = decoder(decoder_output, encoder_output, src_mask, causal)
 
             # Final layer
             logits = self.projection(decoder_output)

@@ -100,7 +100,7 @@ class MotionDataset(Dataset):
             text = rd.choice(descriptions)
 
             # Tokenize the text description
-            tokens = self.tokenizer(text, max_length=512, truncation=True, return_tensors=None)
+            tokens = self.tokenizer(text, max_length=64, truncation=True, return_tensors=None)
 
             return {
                 "motion": motion,
