@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 from ..metrics import contrastive_loss, cross_entropy_loss
-from torch.profiler import profile, record_function, ProfilerActivity
+# from torch.profiler import profile, record_function, ProfilerActivity
 
 
 def training(model: nn.Module,
@@ -47,13 +47,8 @@ def training(model: nn.Module,
     -------
     train_losses : list of float
         Average training loss for each epoch.
-    train_accuracies : list of float
-        Training accuracy (percentage) for each epoch.
     val_losses : list of float
         Validation loss for each epoch.
-        Empty if val_loader is None.
-    val_accuracies : list of float
-        Validation accuracy (percentage) for each epoch.
         Empty if val_loader is None.
     """
 
@@ -62,7 +57,7 @@ def training(model: nn.Module,
     scaler = GradScaler(enabled=use_amp)
 
     train_losses = []
-    val_metrics = []
+    val_metrics, val_loss = [], []
 
     pad_token_id = train_loader.dataset.tokenizer.pad_token_id
 
@@ -72,7 +67,8 @@ def training(model: nn.Module,
         model.train()
         running_loss = torch.tensor(0.0, device=device)
 
-        for k, item in enumerate(train_loader):
+        for item in train_loader:
+            optimizer.zero_grad(set_to_none=True)
 
             motion = item['motion'].to(device, non_blocking=True)
             captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
@@ -94,8 +90,6 @@ def training(model: nn.Module,
                 # Combine them (lambda is a hyperparameter, start with 0.1)
                 loss = ce_loss + (alpha * cl_loss)
         
-            optimizer.zero_grad(set_to_none=True)
-
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -106,18 +100,15 @@ def training(model: nn.Module,
         train_losses.append(epoch_loss)
 
         if (val_loader is not None) and ((epoch+1) % 25 == 0):
-            val_scores = validation(
+            val_scores, val_loss = validation(
                 model, val_loader, device, use_amp=use_amp
             )
             val_metrics.append(val_scores)
+            val_loss.append(val_loss)
 
-            epoch_tqdm.set_postfix(
-                train_loss=epoch_loss
-            )
-        else:
-            epoch_tqdm.set_postfix(train_loss=epoch_loss)
+        epoch_tqdm.set_postfix(train_loss=epoch_loss)
 
-    return train_losses, val_metrics
+    return train_losses, val_metrics, val_loss
 
 
 from ..metrics import Evaluator
@@ -161,20 +152,26 @@ def validation(model: nn.Module,
 
     evaluator = Evaluator()
     all_references, all_generated = [], []
+    running_loss = torch.tensor(0.0, device=device)
 
-    for k, item in enumerate(val_loader):
+    for item in val_loader:
         motion = item['motion'].to(device, non_blocking=True)
         encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
         captions = item['captions']
+        captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
 
         with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
             outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
             generated_ids = outputs_ids["decoder_output"]
-            texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            loss = cross_entropy_loss(generated_ids, captions_tokens, pad_id)
+        
+        running_loss += loss.detach() * motion.size(0)
+        texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
         all_references.extend(captions)
         all_generated.extend(texts)
 
     metrics_scores = evaluator.compute_metrics(all_references, all_generated)
+    val_loss = running_loss.item() / len(val_loader.dataset)
 
-    return [metrics_scores]
+    return metrics_scores, val_loss
