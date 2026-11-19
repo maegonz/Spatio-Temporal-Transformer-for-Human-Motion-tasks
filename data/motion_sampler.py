@@ -2,7 +2,6 @@ import random as rd
 from torch.utils.data import Sampler
 from collections import defaultdict
 
-rd.seed(42)
 
 class MotionSampler(Sampler):
     def __init__(self, frames, batch_size=32, bucket_size=32, shuffle=True):
