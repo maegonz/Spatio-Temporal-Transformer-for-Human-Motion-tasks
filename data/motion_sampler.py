@@ -4,7 +4,7 @@ from collections import defaultdict
 
 
 class MotionSampler(Sampler):
-    def __init__(self, frames, batch_size=32, bucket_size=32, shuffle=True):
+    def __init__(self, frames, batch_size=32, bucket_size=32, shuffle=True, drop_last=False):
         """
         Sampler that groups sequences of similar frames into the same batch.
 
@@ -21,25 +21,37 @@ class MotionSampler(Sampler):
         self.batch_size = batch_size
         self.bucket_size = bucket_size
         self.shuffle = shuffle
+        self.drop_last = drop_last
 
         # Group indices by frames
         buckets = defaultdict(list)
         for id, frame in enumerate(frames):
             bucket_id = frame // self.bucket_size
             buckets[bucket_id].append(id)
-        
-        # Create batches
-        self.batches = []
-        for bucket in buckets.values():
-            for i in range(0, len(bucket), self.batch_size):
-                batch = bucket[i:i + self.batch_size]
-                self.batches.append(batch)
-        
-        if self.shuffle:
-            rd.shuffle(self.batches)
+        self.buckets = [buckets[k] for k in sorted(buckets)]
+
+        if drop_last:
+            self._num_batches = sum(len(b) // batch_size for b in self.buckets)
+        else:
+            self._num_batches = sum(-(-len(b) // batch_size) for b in self.buckets)
+
 
     def __len__(self):
-        return len(self.batches)
+        return self._num_batches
     
     def __iter__(self):
-        yield from self.batches
+        batches = []
+        for bucket in self.buckets:
+            indices = list(bucket)
+            if self.shuffle:
+                rd.shuffle(indices)
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if self.drop_last and len(batch) < self.batch_size:
+                    continue
+                batches.append(batch)
+
+        if self.shuffle:
+            rd.shuffle(batches)
+            
+        yield from batches
