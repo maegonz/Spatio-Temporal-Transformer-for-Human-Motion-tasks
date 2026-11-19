@@ -86,7 +86,7 @@ class MotionDataset(Dataset):
     def __getitem__(self, idx):
         # read npy motion file
         motion = np.load(self.motion_files[idx], mmap_mode='r')  # [T, J, 3]
-        motion = (motion - self.mean) / (self.std + 1e-8)        # normalize the motion data
+        motion = (motion - self.mean) / (self.std)               # normalize the motion data
         motion = torch.from_numpy(motion.copy()).float()         # convert to torch tensor
     
         if self.file != "test":
