@@ -111,6 +111,7 @@ class STformer(nn.Module):
                 encoder_attn_mask: Optional[torch.Tensor]=None,
                 max_len: Optional[int] = 50,
                 eos_token_id: Optional[int] = 1,
+                pad_token_id: Optional[int] = 0,
                 temperature: Optional[float] = 0.0):
         """
         Run encoder-decoder to predict description sequence.
@@ -175,7 +176,7 @@ class STformer(nn.Module):
 
         else:
             # Inference path
-            logits = self.generate_description(encoder_output, src_mask, max_len=max_len, eos_token_id=eos_token_id, temperature=temperature)
+            logits = self.generate_description(encoder_output, src_mask, max_len=max_len, eos_token_id=eos_token_id, pad_token_id=pad_token_id, temperature=temperature)
             text_embeddings = None  # No text embeddings during inference
 
         return {
@@ -191,6 +192,7 @@ class STformer(nn.Module):
                  src_mask: torch.Tensor,
                  max_len: int = 50,
                  eos_token_id: int = 1,
+                 pad_token_id: int = 0,
                  temperature: float = 0.0):
         """
         Generate description sequence during inference.
@@ -205,6 +207,8 @@ class STformer(nn.Module):
             Maximum length of the generated sequence.
         eos_token_id : int
             End-of-sequence token ID. Defaults to 1.
+        pad_token_id: int
+            Pad token ID. Defaults to 0.
         temperature : float
             Temperature for sampling. Defaults to 0.0. 
             If 0, uses greedy decoding, if > 1 flattens
@@ -224,6 +228,7 @@ class STformer(nn.Module):
         # Initialize the decoder input with a start token (assuming start token ID is 0)
         # generated_ids = torch.zeros((batch_size, 1), dtype=torch.long, device=encoder_output.device)  # Start with zeros
         generated_ids = torch.full((batch_size, 1), fill_value=0, dtype=torch.long, device=encoder_output.device)  # Start with start token ID 0
+        done = torch.zeros(batch_size, dtype=torch.bool, device=encoder_output.device)
 
         for _ in range(max_len):  # Maximum generation length
             tgt_emb = self.deco_embedding(generated_ids)
@@ -250,11 +255,13 @@ class STformer(nn.Module):
                 proba = torch.softmax(next_token_logits / temperature, dim=-1)  # [B, vocab_size]
                 next_token_id = torch.multinomial(proba, num_samples=1)  # [B, 1]
 
+            next_token_id = next_token_id.masked_fill(done.unsqueeze(-1), pad_token_id)
             # Append the predicted token to the generated sequence
             generated_ids = torch.cat((generated_ids, next_token_id), dim=1)
 
             # Stop if all sequences have generated an end-of-sequence token (assuming EOS token ID is 1)
-            if (next_token_id == eos_token_id).all():
+            done |= next_token_id.squeeze(-1) == eos_token_id
+            if done.all():
                 break
 
         return generated_ids
