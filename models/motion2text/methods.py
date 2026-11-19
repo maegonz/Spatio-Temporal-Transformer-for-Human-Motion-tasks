@@ -127,10 +127,9 @@ from .transformers.blocks import TextTokenizer
 def validation(model: nn.Module, 
                val_loader: DataLoader,
                device: torch.device,
-               tokenizer=TextTokenizer('t5-small'),
                use_amp: bool = True):
     """
-    Evaluate a PyTorch model on a dataset with optional AMP.
+    Generate captions for the validation set and compute text metrics.
 
     Parameters
     ----------
@@ -154,14 +153,14 @@ def validation(model: nn.Module,
         Average accuracy (percentage) over the entire dataset.
     """
 
-    tokenizer.to(device)
+    tokenizer = val_loader.dataset.tokenizer
+    eos_id, pad_id = tokenizer.eos_token_id, tokenizer.pad_token_id
+    
     model.to(device)
-
     model.eval()
+
     evaluator = Evaluator()
-    metrics_scores = []
-    all_references = []
-    all_generated = []
+    all_references, all_generated = [], []
 
     for k, item in enumerate(val_loader):
         motion = item['motion'].to(device, non_blocking=True)
@@ -169,14 +168,13 @@ def validation(model: nn.Module,
         captions = item['captions']
 
         with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
-            outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask)
-            logits = outputs_ids["decoder_output"]
-            texts = tokenizer.batch_decode(logits, skip_special_tokens=True)
+            outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
+            generated_ids = outputs_ids["decoder_output"]
+            texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
 
         all_references.extend(captions)
         all_generated.extend(texts)
 
-    scores = evaluator.compute_metrics(all_references, all_generated)
-    metrics_scores.append(scores)
+    metrics_scores = evaluator.compute_metrics(all_references, all_generated)
 
-    return metrics_scores
+    return [metrics_scores]
