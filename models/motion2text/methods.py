@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 from ..metrics import contrastive_loss, cross_entropy_loss
@@ -11,6 +13,7 @@ from ..metrics import contrastive_loss, cross_entropy_loss
 def training(model: nn.Module,
             train_loader: DataLoader,
             optimizer: Optimizer,
+            scheduler: LRScheduler,
             device: torch.device,
             epochs: int,
             prefix_ids: torch.Tensor,
@@ -84,17 +87,20 @@ def training(model: nn.Module,
 
                 motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
 
-                ce_loss = cross_entropy_loss(outputs["decoder_output"], labels, pad_token_id)
-                cl_loss = contrastive_loss(motion_features, text_features)
+            ce_loss = cross_entropy_loss(outputs["decoder_output"], labels, pad_token_id)
+            cl_loss = contrastive_loss(motion_features, text_features)
 
-                # Combine them (lambda is a hyperparameter, start with 0.1)
-                loss = ce_loss + (alpha * cl_loss)
+            # Combine them (lambda is a hyperparameter, start with 0.1)
+            loss = ce_loss + (alpha * cl_loss)
         
             scaler.scale(loss).backward()
+            # clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)
             scaler.update()
 
             running_loss += loss.detach() * motion.size(0)
+
+        scheduler.step()
 
         epoch_loss = running_loss.item() / len(train_loader.dataset)
         train_losses.append(epoch_loss)
