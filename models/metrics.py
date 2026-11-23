@@ -14,29 +14,32 @@ nltk.download('wordnet', quiet=True)
 ## ------------------------ Motion2Text Metrics -----------------
 ## ================================================================
 
-def cross_entropy_loss(logits, target, pad_token_id: Optional[int]=-100):
+def cross_entropy_loss(logits, target, label_smoothing: float=0.1, pad_token_id: Optional[int]=-100):
     """
-    Compute cross-entropy loss for sequence generation tasks, ignoring padding tokens.
-    
+    Compute label-smoothed cross-entropy over a sequence, ignoring padding tokens.
+
     Parameters
     ----------
-    logits: torch.Tensor
-        of shape (batch_size, seq_len, vocab_size)
-    target: torch.Tensor
-        of shape (batch_size, seq_len)
-    pad_token_id: int
-        The ID used for padding tokens in the target sequence.
-    
+    logits : torch.Tensor
+        Logits of shape (batch_size, seq_len, vocab_size).
+    target : torch.Tensor
+        Target token IDs of shape (batch_size, seq_len).
+    label_smoothing : float, optional
+        Amount of label smoothing to apply. Defaults to 0.1.
+    pad_token_id : int or None, optional
+        Target token ID to ignore. Defaults to -100.
+
     Returns
     -------
-    loss: Scalar tensor representing the average cross-entropy loss over non-padding tokens.
+    torch.Tensor
+        Scalar tensor containing the average cross-entropy over non-padding tokens.
     """
     labels = target.clone()
 
     logits = logits.permute(0, 2, 1)  # (batch_size, vocab_size, seq_len)
 
     # Compute cross-entropy loss, ignoring padding tokens
-    loss = F.cross_entropy(logits, labels, ignore_index=pad_token_id)
+    loss = F.cross_entropy(logits, labels, label_smoothing=label_smoothing, ignore_index=pad_token_id)
 
     return loss
 

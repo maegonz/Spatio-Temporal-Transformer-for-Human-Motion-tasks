@@ -63,3 +63,37 @@ def global_mean_pooling(x, mask: Optional[torch.Tensor]=None) -> torch.Tensor:
     pooled_x = (x * mask).sum(dim=1) / sum_len  # [batch_size, feature_dim]
 
     return pooled_x
+
+import math
+
+def lr_warmup_function(epochs:int, len_train: int):
+    """
+    Create a learning-rate schedule with linear warmup and cosine decay.
+
+    The schedule assumes one scheduler step per training batch. Warmup lasts
+    for 5 percent of the total training steps, after which the learning-rate
+    multiplier follows a cosine decay.
+
+    Parameters
+    ----------
+    epochs : int
+        Number of training epochs.
+    len_train : int
+        Number of training batches per epoch.
+
+    Returns
+    -------
+    callable
+        A function that accepts the current step and returns the
+        corresponding learning-rate multiplier.
+    """
+    steps = epochs * len_train
+    warmup = int(0.05 * steps)
+
+    def lr_lambda(step):
+        if step < warmup: 
+            return step / max(1, warmup)
+        p = (step - warmup) / max(1, steps - warmup)
+        return 0.5 * (1 + math.cos(math.pi * p))
+
+    return lr_lambda

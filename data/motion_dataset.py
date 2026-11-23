@@ -34,6 +34,8 @@ class MotionDataset(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
         self.tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
+        self.mean_std = os.path.exists("train_mean_std.npz")
+
         # path of the text descripions and motions directory
         # .../text/
         # .../motions/
@@ -58,8 +60,12 @@ class MotionDataset(Dataset):
 
         # Normalisation
         if file == "train":
-            if mean is None or std is None:
+            if mean is None or std is None or not self.mean_std:
                 self.compute_mean_std()
+            elif (mean is None or std is None) and self.mean_std:
+                npzfile = np.load("train_mean_std.npz")
+                self.mean = npzfile['x']
+                self.std = npzfile['y']
             else:
                 self.mean = mean
                 self.std = std
@@ -79,6 +85,9 @@ class MotionDataset(Dataset):
 
         self.mean = sum_ / count
         self.std = np.sqrt(sum_sq / count - (self.mean ** 2)) + 1e-8  # avoid division by zero
+        
+        if not self.mean_std:
+            np.savez("train_mean_std.npz", x=self.mean, y=self.std)
 
     def __len__(self):
         return len(self.files_name)
@@ -106,7 +115,6 @@ class MotionDataset(Dataset):
                 "motion": motion,
                 "captions": text,
                 "input_ids": tokens["input_ids"],  # shape: (1, seq_len)
-                # "t5_attn_mask": tokens["attention_mask"],  # shape: (1, seq_len)
             }
         else:
             return {

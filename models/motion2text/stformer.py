@@ -125,7 +125,7 @@ class STformer(nn.Module):
             Predicted description sequence of shape (batch, tgt_vocab_size).
         """
         assert encoder_attn_mask is not None, "pass the collate attn_mask (B, T) bool"
-        src_mask = encoder_attn_mask #if encoder_attn_mask is not None else src_mask
+        src_mask = encoder_attn_mask
 
         # Embedding and positional encoding
         # src: (B, T, 22, 3)
