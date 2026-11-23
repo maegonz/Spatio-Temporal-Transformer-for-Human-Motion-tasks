@@ -168,10 +168,12 @@ class STformer(nn.Module):
 
             # Final linear layer
             logits = self.projection(decoder_output)
-            logits = logits.squeeze(2)  # [B, T, vocab_size]
-
+            L = logits.size(1)
+            assert logits.size(2) == 1, f"Expected singleton dim for logits after projection, got {logits.shape} instead"
+            logits = logits.view(B, L, -1)  # [B, T, vocab_size]
             # --- Masked Mean for Text Embeddings ---
-            text_embeddings = decoder_output.squeeze(2)  # (B, T, model_dim)
+            assert decoder_output.size(2) == 1, f"Expected singleton dim for decoder output before global mean pooling, got {decoder_output.shape} instead"
+            text_embeddings = decoder_output.view(B, L, -1)  # (B, T, model_dim)
             text_embeddings = global_mean_pooling(text_embeddings, mask=tgt_pad_mask)  # (B, model_dim)
 
         else:
@@ -186,7 +188,7 @@ class STformer(nn.Module):
             "loss": None
         }
 
-    # @torch.no_grad()
+    @torch.no_grad()  
     def generate_description(self, 
                  encoder_output: torch.Tensor, 
                  src_mask: torch.Tensor,
@@ -222,7 +224,6 @@ class STformer(nn.Module):
         torch.Tensor
             Generated description sequence of shape (batch, tgt_vocab_size).
         """
-        self.eval()  # Set the model to evaluation mode
         batch_size = encoder_output.size(0)
 
         # Initialize the decoder input with a start token (assuming start token ID is 0)

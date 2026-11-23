@@ -4,9 +4,9 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 from tqdm import tqdm
-from ..metrics import contrastive_loss, cross_entropy_loss
+from ..metrics import contrastive_loss, cross_entropy_loss, Evaluator
 # from torch.profiler import profile, record_function, ProfilerActivity
 
 
@@ -16,8 +16,8 @@ def training(model: nn.Module,
             scheduler: LRScheduler,
             device: torch.device,
             epochs: int,
-            prefix_ids: torch.Tensor,
             val_loader: DataLoader=None,
+            val_step: int=25,
             alpha: float=0.1,
             use_amp: bool=True):
     """
@@ -57,10 +57,9 @@ def training(model: nn.Module,
 
     model.to(device)
     use_amp = use_amp and device.type == "cuda"
-    scaler = GradScaler(enabled=use_amp)
 
     train_losses = []
-    val_metrics, val_loss = [], []
+    val_metrics, val_losses = [], []
 
     pad_token_id = train_loader.dataset.tokenizer.pad_token_id
 
@@ -74,8 +73,8 @@ def training(model: nn.Module,
             optimizer.zero_grad(set_to_none=True)
 
             motion = item['motion'].to(device, non_blocking=True)
-            captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
-            encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
+            captions_tokens = item['input_ids'].to(device, non_blocking=True)
+            encoder_attn_mask = item['attn_mask'].to(device, non_blocking=True)
 
             # decoder input = start token and labels shifted
             labels = captions_tokens
@@ -85,7 +84,7 @@ def training(model: nn.Module,
             with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
                 outputs = model(motion, decoder_input, encoder_attn_mask=encoder_attn_mask)
 
-                motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
+            motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
 
             ce_loss = cross_entropy_loss(outputs["decoder_output"], labels, pad_token_id)
             cl_loss = contrastive_loss(motion_features, text_features)
@@ -93,10 +92,9 @@ def training(model: nn.Module,
             # Combine them (lambda is a hyperparameter, start with 0.1)
             loss = ce_loss + (alpha * cl_loss)
         
-            scaler.scale(loss).backward()
+            loss.backward()
             # clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             running_loss += loss.detach() * motion.size(0)
 
@@ -105,20 +103,18 @@ def training(model: nn.Module,
         epoch_loss = running_loss.item() / len(train_loader.dataset)
         train_losses.append(epoch_loss)
 
-        if (val_loader is not None) and ((epoch+1) % 25 == 0):
+        if (val_loader is not None) and ((epoch+1) % val_step == 0):
             val_scores, val_loss = validation(
                 model, val_loader, device, use_amp=use_amp
             )
             val_metrics.append(val_scores)
-            val_loss.append(val_loss)
+            val_losses.append(val_loss)
 
         epoch_tqdm.set_postfix(train_loss=epoch_loss)
 
-    return train_losses, val_metrics, val_loss
+    return train_losses, val_metrics, val_losses
 
 
-from ..metrics import Evaluator
-from .transformers.blocks import TextTokenizer
 
 @torch.no_grad()
 def validation(model: nn.Module, 
@@ -162,9 +158,9 @@ def validation(model: nn.Module,
 
     for item in val_loader:
         motion = item['motion'].to(device, non_blocking=True)
-        encoder_attn_mask = item['attn_mask'].squeeze(1).to(device, non_blocking=True)
+        encoder_attn_mask = item['attn_mask'].to(device, non_blocking=True)
         captions = item['captions']
-        captions_tokens = item['input_ids'].squeeze(1).to(device, non_blocking=True)
+        captions_tokens = item['input_ids'].to(device, non_blocking=True)
 
         with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
             outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
