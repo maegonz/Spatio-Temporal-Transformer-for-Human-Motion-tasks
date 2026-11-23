@@ -44,24 +44,19 @@ def collate_fn_motion(batch, tokenizer):
     # Concatenate captions texts, tokens and t5 attention masks
     caption_texts = [item['captions'] for item in batch]
     list_input_ids = [item['input_ids'] for item in batch]
-    # list_t5_attn_mask = [item['t5_attn_mask'] for item in batch]
 
     # Pad the input_ids and attention masks for T5
     text_features = tokenizer.pad(
         {
             "input_ids": list_input_ids,
-            # "attention_mask": list_t5_attn_mask
         },
         padding=True,
         return_tensors="pt",
     )
 
-    # text_features["t5_attn_mask"] = text_features.pop("attention_mask")
-
     return {
         "motion": padded_motions,
         "attn_mask": motion_masks,
         "input_ids": text_features["input_ids"],
-        # "t5_attn_mask": text_features["t5_attn_mask"],
         "captions": caption_texts
     }
