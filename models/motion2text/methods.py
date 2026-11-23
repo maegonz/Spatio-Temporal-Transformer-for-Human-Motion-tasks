@@ -160,16 +160,25 @@ def validation(model: nn.Module,
         motion = item['motion'].to(device, non_blocking=True)
         encoder_attn_mask = item['attn_mask'].to(device, non_blocking=True)
         captions = item['captions']
-        captions_tokens = item['input_ids'].to(device, non_blocking=True)
+        labels = item['input_ids'].to(device, non_blocking=True)
+        decoder_input = labels_shift(labels, pad_id)
+        B = motion.size(0)
 
         with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
-            outputs_ids = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
-            generated_ids = outputs_ids["decoder_output"]
-            loss = cross_entropy_loss(generated_ids, captions_tokens, pad_id)
-        
-        running_loss += loss.detach() * motion.size(0)
-        texts = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            # teacher forcing pass
+            tf_output = model(motion, decoder_input, encoder_attn_mask=encoder_attn_mask)
+            tf_ids = tf_output["decoder_output"]
 
+            # free generation pass
+            gen_output = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
+            gen_ids = gen_output["decoder_output"]
+
+        # loss
+        loss = cross_entropy_loss(tf_ids.float(), labels, pad_id)
+        running_loss += loss.detach() * B
+
+        # metrics
+        texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         all_references.extend(captions)
         all_generated.extend(texts)
 
@@ -177,3 +186,8 @@ def validation(model: nn.Module,
     val_loss = running_loss.item() / len(val_loader.dataset)
 
     return metrics_scores, val_loss
+
+def labels_shift(labels: torch.Tensor, start_token: int = 0):
+    start = torch.full_like(labels[:, :1], start_token)
+    decoder_input = torch.cat([start, labels[:, :-1]], dim=1)
+    return decoder_input 
