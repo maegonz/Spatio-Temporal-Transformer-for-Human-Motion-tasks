@@ -90,10 +90,10 @@ def training(model: nn.Module,
             with autocast(device_type=device.type, enabled=use_amp, dtype=torch.bfloat16):
                 outputs = model(motion, decoder_input, encoder_attn_mask=encoder_attn_mask)
 
-            motion_features, text_features = outputs["motion_embeddings"], outputs["text_embeddings"]
+            motion_features, text_features, logit_scale = outputs["motion_embeddings"], outputs["text_embeddings"], outputs["logit_scale"]
 
             ce_loss = cross_entropy_loss(outputs["decoder_output"].float(), labels, label_smoothing, pad_token_id)
-            cl_loss = contrastive_loss(motion_features.float(), text_features.float())
+            cl_loss = contrastive_loss(motion_features.float(), text_features.float(), scale=logit_scale)
 
             # Combine them (lambda is a hyperparameter, start with 0.1)
             loss = ce_loss + (alpha * cl_loss)
