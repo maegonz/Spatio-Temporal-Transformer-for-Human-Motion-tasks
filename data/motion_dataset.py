@@ -63,7 +63,7 @@ class MotionDataset(Dataset):
             if mean is None or std is None or not self.mean_std:
                 self.compute_mean_std()
             elif (mean is None or std is None) and self.mean_std:
-                npzfile = np.load("train_mean_std.npz")
+                npzfile = np.load("./data/train_mean_std.npz")
                 self.mean = npzfile['x']
                 self.std = npzfile['y']
             else:
@@ -87,7 +87,7 @@ class MotionDataset(Dataset):
         self.std = np.sqrt(sum_sq / count - (self.mean ** 2)) + 1e-8  # avoid division by zero
         
         if not self.mean_std:
-            np.savez("train_mean_std.npz", x=self.mean, y=self.std)
+            np.savez("./data/train_mean_std.npz", x=self.mean, y=self.std)
 
     def __len__(self):
         return len(self.files_name)
