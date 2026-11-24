@@ -4,12 +4,12 @@ from .blocks import FastMultiHeadAttention, FeedForward
 
 class Encoder(nn.Module):
     # TODO INIT METHOD
-    def __init__(self, model_dim: int, num_heads: int, dropout: float, ff_dim: int):
+    def __init__(self, model_dim: int, num_heads: int, dropout: float, ff_dim: int, swiglu: bool = False):
         super(Encoder, self).__init__()
 
         self.s_atten = FastMultiHeadAttention(model_dim, num_heads)
         self.layer_1_norm = nn.LayerNorm(model_dim)
-        self.feed_fwrd = FeedForward(model_dim, ff_dim, dropout)
+        self.feed_fwrd = FeedForward(model_dim, model_dim, ff_dim, dropout, swiglu)
         self.layer_2_norm = nn.LayerNorm(model_dim)
         self.dropout = nn.Dropout(dropout)
 

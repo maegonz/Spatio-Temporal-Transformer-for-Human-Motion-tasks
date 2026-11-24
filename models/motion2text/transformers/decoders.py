@@ -3,7 +3,7 @@ import torch.nn as nn
 from .blocks import FastMultiHeadAttention, FeedForward
 
 class Decoder(nn.Module):
-    def __init__(self, model_dim: int, num_heads: int, dropout: float, ff_dim: int):
+    def __init__(self, model_dim: int, num_heads: int, dropout: float, ff_dim: int, swiglu: bool = False):
         super(Decoder, self).__init__()
 
         self.s_attn = FastMultiHeadAttention(model_dim, num_heads)
@@ -12,7 +12,7 @@ class Decoder(nn.Module):
         self.cross_atten = FastMultiHeadAttention(model_dim, num_heads)
         self.layer_2_norm = nn.LayerNorm(model_dim)
 
-        self.feed_fwrd = FeedForward(model_dim, ff_dim, dropout)
+        self.feed_fwrd = FeedForward(model_dim, model_dim, ff_dim, dropout, swiglu)
         self.layer_3_norm = nn.LayerNorm(model_dim)
 
         self.dropout = nn.Dropout(dropout)
