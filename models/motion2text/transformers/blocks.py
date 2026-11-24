@@ -41,12 +41,17 @@ class FastMultiHeadAttention(nn.Module):
 
         # Use FlashAttention from PyTorch
         # The mask should be a boolean mask (True for keeping, False for masking) or a float mask.
-        if mask is not None and mask.dtype != torch.bool:
-            mask = mask.to(torch.bool)
+        if mask is not None:
+            if mask.dtype != torch.bool:
+                mask = mask.to(torch.bool)
+            
+            # [B, S, S] -> [B, H, S, S]
+            attn_mask = mask[:, None, :]      # [B, 1, S, S]
+            attn_mask = attn_mask.expand(-1, self.num_heads, -1, -1)  # [B, H, S, S]
 
         atten_output = F.scaled_dot_product_attention(
             q, k, v, 
-            attn_mask=mask,
+            attn_mask=attn_mask,
             dropout_p=0.2,
             is_causal=False
         )

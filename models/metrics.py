@@ -43,17 +43,43 @@ def cross_entropy_loss(logits, target, label_smoothing: float=0.1, pad_token_id:
 
     return loss
 
-def contrastive_loss(motion_features, text_features, temperature=0.07):
+def contrastive_loss(motion_features, text_features, scale=None, temperature=0.07):
     """
-    motion_features: [batch, dim] (Mean-pooled output of MotionAdapter)
-    text_features: [batch, dim] (Mean-pooled hidden states of T5 embeddings)
+    Compute a symmetric bidirectional contrastive (InfoNCE) loss.
+
+    Motion and text features are normalized along the feature dimension and
+    compared using cosine similarity. The scaled similarity matrix is then
+    used to predict the matching text for each motion and the matching motion
+    for each text; the two cross-entropies are averaged.
+
+    Parameters
+    ----------
+    motion_features : torch.Tensor
+        Motion embeddings with shape ``(batch_size, dim)``, such as mean-pooled
+        output from the MotionAdapter.
+    text_features : torch.Tensor
+        Text embeddings with shape ``(batch_size, dim)``, such as mean-pooled
+        hidden states from T5.
+    scale : torch.Tensor or None, optional
+        Optional learnable log-scale parameter. When provided, it is
+        exponentiated and clamped to 100. If omitted, ``1 / temperature`` is
+        used as the scale.
+    temperature : float, optional
+        Temperature used to scale similarities when ``scale`` is None.
+        Defaults to 0.07.
+
+    Returns
+    -------
+    torch.Tensor
+        A scalar tensor containing the average of the motion-to-text and
+        text-to-motion cross-entropy losses.
     """
     # Normalize to get cosine similarity
     motion_features = F.normalize(motion_features, dim=-1)
     text_features = F.normalize(text_features, dim=-1)
     
     # Calculate logits (batch_size, batch_size)
-    logits_scale = 1.0 / temperature
+    logits_scale = scale.exp().clamp(max=100) if scale is not None else 1.0 / temperature
     logits = torch.matmul(motion_features, text_features.T) * logits_scale
     
     # Labels are diagonal (each motion matches its own text)

@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import math
 from .transformers.blocks import PositionalEmbedding, FeedForward, FastMultiHeadAttention
+from .transformers.encoders import Encoder
 from .transformers.decoders import Decoder
 from .graph.encoders import STEncoder, TEncoder
 from .graph.decoders import TDecoder
@@ -17,32 +19,70 @@ class STformer(nn.Module):
                  num_heads: int = 8, 
                  num_layers: int = 6,
                  kernel_size: int = 3, 
-                 max_seq_len: int = 100,
                  dropout: float = 0.2,
+                 projection_head: bool = True,
+                 text_layers: int = 2,
                  swiglu: bool = False):
         """
-        Params
-        -------
-        motion_dim: int
-            Dimensionality of the input motion data.
-        tgt_vocab_size: int
-            Target vocabulary size.
-        model_dim: int
-            The dimensionality of the model's embeddings.
-        ff_dim: int
-            Dimensionality of the inner layer in the feed-forward network.
-        num_heads: int
-            Number of attention heads in the multi-head attention mechanism.
-        num_layers: int
-            Number of layers for both the encoder and the decoder.
-        kernel_size: int
-            Kernel size for the spatial-temporal encoder.
-        max_seq_len: int
-            Maximum sequence length for positional encoding.
-        dropout: float
-            Dropout rate for regularization. Defaults to 0.2.
-        swiglu: bool
-            Whether to use SwiGLU activation function. Defaults to False.
+        Spatial-temporal transformer for motion-to-text generation.
+
+        STformer encodes joint trajectories with spatial-temporal graph and
+        temporal encoder layers, decodes target text tokens autoregressively,
+        and provides optional projected embeddings for motion-text contrastive
+        learning.
+
+        Parameters
+        ----------
+        motion_dim : int
+            Dimensionality of each input motion joint feature.
+        tgt_vocab_size : int
+            Number of tokens in the target vocabulary.
+        model_dim : int, optional
+            Dimensionality of model embeddings. Defaults to 512.
+        ff_dim : int, optional
+            Dimensionality of feed-forward network hidden layers. Defaults to 512.
+        num_heads : int, optional
+            Number of attention heads. Defaults to 8.
+        num_layers : int, optional
+            Number of spatial-temporal, temporal, and decoder layers.
+            Defaults to 6.
+        kernel_size : int, optional
+            Kernel size of the spatial-temporal encoders. Defaults to 3.
+        dropout : float, optional
+            Dropout probability used throughout the model. Defaults to 0.2.
+        projection_head : bool, optional
+            Whether to project motion and text embeddings for contrastive learning.
+            Defaults to True.
+        text_layers : int, optional
+            Number of text encoder layers. Defaults to 2.
+        swiglu : bool, optional
+            Whether to use SwiGLU in feed-forward and projection layers.
+            Defaults to False.
+
+        Attributes
+        ----------
+        enc_embedding : FeedForward
+            Projects motion features into the model embedding space.
+        deco_embedding : torch.nn.Embedding
+            Maps target token IDs to model embeddings.
+        pos_embedding : PositionalEmbedding
+            Adds positional information to motion and text embeddings.
+        encoder : torch.nn.ModuleList
+            Spatial-temporal and temporal motion encoder layers.
+        decoder : torch.nn.ModuleList
+            Autoregressive target text decoder layers.
+        text_encoder : torch.nn.ModuleList
+            Transformer encoder layers used to represent text embeddings.
+        motion_proj : torch.nn.Linear, optional
+            Projects pooled motion embeddings when projection heads are enabled.
+        text_proj : torch.nn.Linear, optional
+            Projects pooled text embeddings when projection heads are enabled.
+        logit_scale : torch.nn.Parameter
+            Learnable log-temperature for contrastive similarity logits.
+        projection : FeedForward
+            Maps decoder output vectors to target vocabulary logits.
+        dropout : torch.nn.Dropout
+            Dropout applied to embedded motion and text features.
         """
         super(STformer, self).__init__()
         # Embedding layers
@@ -50,7 +90,7 @@ class STformer(nn.Module):
         self.deco_embedding = nn.Embedding(tgt_vocab_size, model_dim)
         self.pos_embedding = PositionalEmbedding(model_dim)
         
-        # Encoder layers
+        # Motion Encoder layers
         self.encoder = nn.ModuleList(
             [STEncoder(model_dim, num_heads, kernel_size, dropout) for _ in range(num_layers)] + 
             [TEncoder(model_dim, num_heads, dropout, ff_dim) for _ in range(num_layers)]
@@ -63,12 +103,26 @@ class STformer(nn.Module):
 
         # self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=3, dropout=dropout)
         
+        # Contrastive layers
+        # Text Encoder
+        # self.text_encoder = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(model_dim, num_heads, ff_dim, dropout, batch_first=True, norm_first=True, num_layers=text_layers, enable_nested_tensor=False)
+        # )
+        self.text_encoder = nn.ModuleList(
+            [Encoder(model_dim, num_heads, dropout, ff_dim, swiglu=swiglu) for _ in range(text_layers)]
+        )
+        self.projection_head = projection_head
+        if projection_head:
+            self.motion_proj = nn.Linear(model_dim, model_dim // 2)
+            self.text_proj = nn.Linear(model_dim, model_dim // 2)
+        # Learnable log-temperature for contrastive loss
+        self.logit_scale = nn.Parameter(torch.tensor(math.log(1/0.07)))
+        
         # Projection layer to map decoder output to target vocabulary size
         self.projection = FeedForward(model_dim, tgt_vocab_size, ff_dim, swiglu=swiglu)
         self.dropout = nn.Dropout(dropout)
 
     def generate_mask(self, 
-                      src: torch.Tensor, 
                       tgt: Optional[torch.Tensor]=None,
                       pad_token_id: int=0):
         """
@@ -78,8 +132,6 @@ class STformer(nn.Module):
 
         Params
         -------
-        src: torch.Tensor
-            input to the encoder
         tgt: torch.Tensor
             input to the decoder
         pad_token_id: int
@@ -105,7 +157,7 @@ class STformer(nn.Module):
                 src: torch.Tensor, 
                 tgt: Optional[torch.Tensor]=None, 
                 encoder_attn_mask: Optional[torch.Tensor]=None,
-                max_len: Optional[int] = 50,
+                max_len: Optional[int] = 64,
                 eos_token_id: Optional[int] = 1,
                 pad_token_id: Optional[int] = 0,
                 temperature: Optional[float] = 0.0):
@@ -143,14 +195,15 @@ class STformer(nn.Module):
         # --- Masked Mean for Motion Embeddings ---
         motion_embeddings = encoder_output.view(B, T * J, -1)  # (B, T*J, model_dim)
         mask_embedddings = src_mask.unsqueeze(-1).expand(-1, -1, J).reshape(B, -1).contiguous()  # (B, T*J)
-        motion_embeddings = global_mean_pooling(motion_embeddings, mask=mask_embedddings)  # (B, model_dim)
+        motion_pooled = global_mean_pooling(motion_embeddings, mask=mask_embedddings)  # (B, model_dim)
+        motion_embeddings = self.motion_proj(motion_embeddings) if self.projection_head else motion_pooled
 
         # Apply joint aggregation to get a single representation per frame
         # encoder_output, src_mask = self.aggregator(encoder_output, mask=src_mask)
 
         if tgt is not None:
             # Training path
-            tgt_mask, tgt_pad_mask = self.generate_mask(src, tgt)
+            tgt_mask, tgt_pad_mask = self.generate_mask(tgt)
 
             tgt_emb = self.deco_embedding(tgt)
             tgt_emb = self.pos_embedding(tgt_emb)
@@ -166,10 +219,14 @@ class STformer(nn.Module):
             L = logits.size(1)
             assert logits.size(2) == 1, f"Expected singleton dim for logits after projection, got {logits.shape} instead"
             logits = logits.view(B, L, -1)  # [B, T, vocab_size]
+
             # --- Masked Mean for Text Embeddings ---
-            assert decoder_output.size(2) == 1, f"Expected singleton dim for decoder output before global mean pooling, got {decoder_output.shape} instead"
-            text_embeddings = decoder_output.view(B, L, -1)  # (B, T, model_dim)
-            text_embeddings = global_mean_pooling(text_embeddings, mask=tgt_pad_mask)  # (B, model_dim)
+            assert tgt_emb.size(2) == 1, f"Expected singleton dim for decoder output before global mean pooling, got {tgt_emb.shape} instead"
+            text_encoder = tgt_emb.view(B, L, -1)  # (B, T, model_dim)
+            for encoder in self.text_encoder:
+                text_encoder = encoder(text_encoder, tgt_mask)
+            text_pooled = global_mean_pooling(text_encoder, mask=tgt_pad_mask)  # (B, model_dim)
+            text_embeddings = self.text_proj(text_pooled) if self.projection_head else text_pooled
 
         else:
             # Inference path
@@ -180,6 +237,7 @@ class STformer(nn.Module):
             "decoder_output": logits,
             "motion_embeddings": motion_embeddings,
             "text_embeddings": text_embeddings,
+            "logit_scale": self.logit_scale,
             "loss": None
         }
 
@@ -187,7 +245,7 @@ class STformer(nn.Module):
     def generate_description(self, 
                  encoder_output: torch.Tensor, 
                  src_mask: torch.Tensor,
-                 max_len: int = 50,
+                 max_len: int = 64,
                  eos_token_id: int = 1,
                  pad_token_id: int = 0,
                  temperature: float = 0.0):
