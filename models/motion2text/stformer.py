@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 from .transformers.blocks import PositionalEmbedding, FeedForward, FastMultiHeadAttention
 from .transformers.encoders import Encoder
@@ -113,8 +114,8 @@ class STformer(nn.Module):
         )
         self.projection_head = projection_head
         if projection_head:
-            self.motion_proj = nn.Linear(model_dim, model_dim // 2)
-            self.text_proj = nn.Linear(model_dim, model_dim // 2)
+            self.motion_proj = nn.Linear(model_dim, model_dim)
+            self.text_proj = nn.Linear(model_dim, model_dim)
         # Learnable log-temperature for contrastive loss
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1/0.07)))
         
@@ -160,7 +161,10 @@ class STformer(nn.Module):
                 max_len: Optional[int] = 64,
                 eos_token_id: Optional[int] = 1,
                 pad_token_id: Optional[int] = 0,
-                temperature: Optional[float] = 0.0):
+                temperature: Optional[float] = 0.0,
+                num_beams: Optional[int] = 1,
+                length_penalty: float = 0.8,
+                no_repeat_ngram_size: int = 3):
         """
         Run encoder-decoder to predict description sequence.
 
@@ -196,7 +200,7 @@ class STformer(nn.Module):
         motion_embeddings = encoder_output.view(B, T * J, -1)  # (B, T*J, model_dim)
         mask_embedddings = src_mask.unsqueeze(-1).expand(-1, -1, J).reshape(B, -1).contiguous()  # (B, T*J)
         motion_pooled = global_mean_pooling(motion_embeddings, mask=mask_embedddings)  # (B, model_dim)
-        motion_embeddings = self.motion_proj(motion_embeddings) if self.projection_head else motion_pooled
+        motion_embeddings = self.motion_proj(motion_pooled) if self.projection_head else motion_pooled
 
         # Apply joint aggregation to get a single representation per frame
         # encoder_output, src_mask = self.aggregator(encoder_output, mask=src_mask)
@@ -230,7 +234,19 @@ class STformer(nn.Module):
 
         else:
             # Inference path
-            logits = self.generate_description(encoder_output, src_mask, max_len=max_len, eos_token_id=eos_token_id, pad_token_id=pad_token_id, temperature=temperature)
+            if num_beams > 1:
+                logits = self.beam_search_description(
+                    encoder_output,
+                    src_mask,
+                    num_beams=num_beams,
+                    max_len=max_len,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                    length_penalty=length_penalty,
+                    no_repeat_ngram_size=no_repeat_ngram_size
+                )
+            else:
+                logits = self.generate_description(encoder_output, src_mask, max_len=max_len, eos_token_id=eos_token_id, pad_token_id=pad_token_id, temperature=temperature)
             text_embeddings = None  # No text embeddings during inference
 
         return {
@@ -240,6 +256,29 @@ class STformer(nn.Module):
             "logit_scale": self.logit_scale,
             "loss": None
         }
+
+    def _last_token_logits(self, 
+                           generated_ids: torch.Tensor,
+                           encoder_output: torch.Tensor,
+                           src_mask: torch.Tensor):
+        tgt_emb = self.deco_embedding(generated_ids)
+        tgt_emb = self.pos_embedding(tgt_emb)
+        tgt_emb = self.dropout(tgt_emb)
+
+        B, L = generated_ids.shape
+        causal = torch.tril(torch.ones((L,L), device=generated_ids.device, dtype=torch.bool))
+        causal = causal.unsqueeze(0).expand(B, -1, -1)
+    
+        decoder_output = tgt_emb
+        for decoder in self.decoder:
+            decoder_output = decoder(decoder_output, encoder_output, src_mask, causal)
+
+        # Final layer
+        logits = self.projection(decoder_output)
+        logits = logits.squeeze(2)  # [B, T, vocab_size]
+
+        # Get the last token's logits and sample the next token
+        return logits[:, -1, :]  # [B, vocab_size]
 
     @torch.no_grad()  
     def generate_description(self, 
@@ -285,24 +324,7 @@ class STformer(nn.Module):
         done = torch.zeros(batch_size, dtype=torch.bool, device=encoder_output.device)
 
         for _ in range(max_len):  # Maximum generation length
-            tgt_emb = self.deco_embedding(generated_ids)
-            tgt_emb = self.pos_embedding(tgt_emb)
-            tgt_emb = self.dropout(tgt_emb)
-
-            B, L = generated_ids.shape
-            causal = torch.tril(torch.ones((L,L), device=generated_ids.device, dtype=torch.bool))
-            causal = causal.unsqueeze(0).expand(B, -1, -1)
-        
-            decoder_output = tgt_emb
-            for decoder in self.decoder:
-                decoder_output = decoder(decoder_output, encoder_output, src_mask, causal)
-
-            # Final layer
-            logits = self.projection(decoder_output)
-            logits = logits.squeeze(2)  # [B, T, vocab_size]
-
-            # Get the last token's logits and sample the next token
-            next_token_logits = logits[:, -1, :]  # [B, vocab_size]
+            next_token_logits = self._last_token_logits(generated_ids, encoder_output, src_mask) 
             if temperature == 0.0:
                 next_token_id = torch.argmax(next_token_logits, dim=-1).unsqueeze(-1)  # [B, 1]
             else:
@@ -319,3 +341,113 @@ class STformer(nn.Module):
                 break
 
         return generated_ids
+
+    @staticmethod
+    def _banned_ngram_tokens(seqs: list, n: int) -> list:
+        """
+        For each sequence (list of ids, first element = start token) return the set of
+        tokens that would create an n-gram already present in the sequence.
+        """
+        banned = []
+        for seq in seqs:
+            seq = seq[1:]  # drop start token
+            b = set()
+            if len(seq) >= n - 1:
+                prefix = tuple(seq[len(seq) - (n - 1):]) if n > 1 else ()
+                for i in range(len(seq) - n + 1):
+                    if tuple(seq[i:i + n - 1]) == prefix:
+                        b.add(seq[i + n - 1])
+            banned.append(b)
+        return banned
+ 
+    @torch.no_grad()
+    def beam_search_description(self,
+                                encoder_output: torch.Tensor,
+                                src_mask: torch.Tensor,
+                                num_beams: int = 4,
+                                max_len: int = 64,
+                                eos_token_id: int = 1,
+                                pad_token_id: int = 0,
+                                start_token_id: int = 0,
+                                length_penalty: float = 0.8,
+                                no_repeat_ngram_size: int = 3):
+        """
+        Batched beam search.
+ 
+        Finished beams stay in the beam set with a frozen score (they can only emit
+        pad at zero cost), and beams are ranked by sum_logprob / length**length_penalty,
+        so finished and unfinished hypotheses are compared on the same footing.
+        Search stops when every beam has finished or max_len is reached.
+ 
+        Parameters
+        ----------
+        num_beams : int
+            Beam width (3-5 is typical).
+        length_penalty : float
+            0 = raw log-prob (favours short), 1 = per-token average (favours long).
+        no_repeat_ngram_size : int
+            Block repeated n-grams (3 is typical). 0 disables.
+ 
+        Returns
+        -------
+        torch.Tensor
+            Best hypothesis per sample, shape (batch, generated_len), same format as
+            generate_description (start token first, eos, then pad).
+        """
+        K = num_beams
+        B = encoder_output.size(0)
+        device = encoder_output.device
+ 
+        # Replicate encoder memory for every beam: (B*K, ...)
+        enc = encoder_output.repeat_interleave(K, dim=0)
+        mask = src_mask.repeat_interleave(K, dim=0)
+ 
+        seqs = torch.full((B * K, 1), start_token_id, dtype=torch.long, device=device)
+        beam_scores = torch.zeros(B, K, device=device)
+        beam_scores[:, 1:] = float('-inf')  # only the first beam is alive at step 0
+        beam_scores = beam_scores.view(-1)
+        gen_len = torch.zeros(B * K, device=device)
+        done = torch.zeros(B * K, dtype=torch.bool, device=device)
+        batch_offset = (torch.arange(B, device=device) * K).unsqueeze(1)  # (B, 1)
+ 
+        for _ in range(max_len):
+            logits = self._last_token_logits(seqs, enc, mask)            # (B*K, V)
+            logp = F.log_softmax(logits.float(), dim=-1)
+            V = logp.size(-1)
+ 
+            # Unfinished beams may never emit pad (pad shares id with the start token)
+            if pad_token_id != eos_token_id:
+                logp[~done, pad_token_id] = float('-inf')
+ 
+            if no_repeat_ngram_size > 0:
+                done_list = done.tolist()
+                for i, b in enumerate(self._banned_ngram_tokens(seqs.tolist(), no_repeat_ngram_size)):
+                    if b and not done_list[i]:
+                        logp[i, list(b)] = float('-inf')
+ 
+            # Finished beams: only pad, at zero cost -> score stays frozen
+            if done.any():
+                logp[done] = float('-inf')
+                logp[done, pad_token_id] = 0.0
+ 
+            cand = beam_scores.unsqueeze(1) + logp                       # (B*K, V) raw sum log-prob
+            new_len = gen_len + (~done).float()
+            norm = cand / new_len.clamp(min=1.0).unsqueeze(1).pow(length_penalty)
+ 
+            top_norm, top_idx = norm.view(B, K * V).topk(K, dim=-1)      # (B, K)
+            beam_idx = torch.div(top_idx, V, rounding_mode='floor')
+            tok = top_idx % V
+            src_rows = (batch_offset + beam_idx).view(-1)                # (B*K,)
+ 
+            beam_scores = cand.view(B, K * V).gather(1, top_idx).view(-1)
+            seqs = torch.cat([seqs[src_rows], tok.view(-1, 1)], dim=1)
+            gen_len = new_len[src_rows]
+            done = done[src_rows] | (tok.view(-1) == eos_token_id)
+ 
+            if done.all():
+                break
+ 
+        final = (beam_scores / gen_len.clamp(min=1.0).pow(length_penalty)).view(B, K)
+        best = final.argmax(dim=-1)                                      # (B,)
+        best_rows = (torch.arange(B, device=device) * K + best)
+        return seqs[best_rows]

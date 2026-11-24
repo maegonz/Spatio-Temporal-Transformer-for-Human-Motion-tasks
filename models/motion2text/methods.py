@@ -17,6 +17,7 @@ def training(model: nn.Module,
             device: torch.device,
             epochs: int,
             label_smoothing: float=0.1,
+            num_beams: int = 1,
             val_loader: DataLoader=None,
             val_step: int=25,
             alpha: float=0.1,
@@ -93,7 +94,7 @@ def training(model: nn.Module,
             motion_features, text_features, logit_scale = outputs["motion_embeddings"], outputs["text_embeddings"], outputs["logit_scale"]
 
             ce_loss = cross_entropy_loss(outputs["decoder_output"].float(), labels, label_smoothing, pad_token_id)
-            cl_loss = contrastive_loss(motion_features.float(), text_features.float(), scale=logit_scale)
+            cl_loss = contrastive_loss(motion_features.float(), text_features.float(), scale=logit_scale.float())
 
             # Combine them (lambda is a hyperparameter, start with 0.1)
             loss = ce_loss + (alpha * cl_loss)
@@ -111,7 +112,7 @@ def training(model: nn.Module,
 
         if (val_loader is not None) and ((epoch+1) % val_step == 0):
             val_scores, val_loss = validation(
-                model, val_loader, device, use_amp=use_amp
+                model, val_loader, device, num_beams=num_beams, use_amp=use_amp
             )
             val_metrics.append(val_scores)
             val_losses.append(val_loss)
@@ -127,6 +128,7 @@ def validation(model: nn.Module,
                val_loader: DataLoader,
                device: torch.device,
                label_smoothing: float = 0.1,
+               num_beams: int = 1,
                use_amp: bool = True):
     """
     Generate captions for the validation set and compute text metrics.
@@ -177,7 +179,7 @@ def validation(model: nn.Module,
             tf_ids = tf_output["decoder_output"]
 
             # free generation pass
-            gen_output = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id)
+            gen_output = model(motion, None, encoder_attn_mask=encoder_attn_mask, eos_token_id=eos_id, pad_token_id=pad_id, num_beams=num_beams)
             gen_ids = gen_output["decoder_output"]
 
         # loss
