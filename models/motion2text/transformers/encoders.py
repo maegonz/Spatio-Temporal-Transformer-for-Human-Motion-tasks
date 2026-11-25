@@ -14,8 +14,8 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
 
-    def forward(self, x, mask):
-        s_atten_ouptut = self.s_atten(x, x, x, mask)
+    def forward(self, x, mask, is_causal=False):
+        s_atten_ouptut = self.s_atten(x, x, x, mask, is_causal)
         res_normed = self.layer_1_norm(self.dropout(s_atten_ouptut) + x)
         feed_fwrd = self.feed_fwrd(res_normed)
         encoder_output = self.layer_2_norm(res_normed + self.dropout(feed_fwrd))

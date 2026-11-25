@@ -102,7 +102,7 @@ class STformer(nn.Module):
             [TDecoder(model_dim, num_heads, dropout, ff_dim, swiglu=swiglu) for _ in range(num_layers)]
         )
 
-        # self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=3, dropout=dropout)
+        self.aggregator = JointAggregator(model_dim=model_dim, num_queries=4, num_heads=4, n_layers=2, dropout=dropout)
         
         # Contrastive layers
         # Text Encoder
@@ -120,7 +120,7 @@ class STformer(nn.Module):
         self.logit_scale = nn.Parameter(torch.tensor(math.log(1/0.07)))
         
         # Projection layer to map decoder output to target vocabulary size
-        self.projection = FeedForward(model_dim, tgt_vocab_size, ff_dim, swiglu=swiglu)
+        self.projection = nn.Linear(model_dim, tgt_vocab_size)  # FeedForward(model_dim, tgt_vocab_size, ff_dim, swiglu=swiglu)
         self.dropout = nn.Dropout(dropout)
 
     def generate_mask(self, 
@@ -203,7 +203,7 @@ class STformer(nn.Module):
         motion_embeddings = self.motion_proj(motion_pooled) if self.projection_head else motion_pooled
 
         # Apply joint aggregation to get a single representation per frame
-        # encoder_output, src_mask = self.aggregator(encoder_output, mask=src_mask)
+        encoder_output, src_mask = self.aggregator(encoder_output, mask=src_mask)
 
         if tgt is not None:
             # Training path
@@ -228,7 +228,7 @@ class STformer(nn.Module):
             assert tgt_emb.size(2) == 1, f"Expected singleton dim for decoder output before global mean pooling, got {tgt_emb.shape} instead"
             text_encoder = tgt_emb.view(B, L, -1)  # (B, T, model_dim)
             for encoder in self.text_encoder:
-                text_encoder = encoder(text_encoder, tgt_mask)
+                text_encoder = encoder(text_encoder, mask=None, is_causal=True)
             text_pooled = global_mean_pooling(text_encoder, mask=tgt_pad_mask)  # (B, model_dim)
             text_embeddings = self.text_proj(text_pooled) if self.projection_head else text_pooled
 
@@ -264,14 +264,10 @@ class STformer(nn.Module):
         tgt_emb = self.deco_embedding(generated_ids)
         tgt_emb = self.pos_embedding(tgt_emb)
         tgt_emb = self.dropout(tgt_emb)
-
-        B, L = generated_ids.shape
-        causal = torch.tril(torch.ones((L,L), device=generated_ids.device, dtype=torch.bool))
-        causal = causal.unsqueeze(0).expand(B, -1, -1)
     
         decoder_output = tgt_emb
         for decoder in self.decoder:
-            decoder_output = decoder(decoder_output, encoder_output, src_mask, causal)
+            decoder_output = decoder(decoder_output, encoder_output, src_mask, decoder_mask=None, is_causal=True)
 
         # Final layer
         logits = self.projection(decoder_output)

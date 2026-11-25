@@ -22,8 +22,8 @@ class TDecoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
 
-    def forward(self, x, encoder_output, encoder_mask, decoder_mask):
-        t_atten_ouptut = self.t_atten(x, x, x, decoder_mask)
+    def forward(self, x, encoder_output, encoder_mask, decoder_mask, is_causal=False):
+        t_atten_ouptut = self.t_atten(x, x, x, decoder_mask, is_causal)
         res_norm = self.layer_1_norm(x + self.dropout(t_atten_ouptut))
 
         cross_atten_output = self.cross_atten(res_norm, encoder_output, encoder_output, encoder_mask)

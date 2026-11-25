@@ -102,10 +102,9 @@ def training(model: nn.Module,
             loss.backward()
             grad_norm = clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             running_loss += loss.detach() * motion.size(0)
-
-        scheduler.step()
 
         epoch_loss = running_loss.item() / len(train_loader.dataset)
         train_losses.append(epoch_loss)

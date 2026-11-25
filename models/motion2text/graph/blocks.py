@@ -78,7 +78,7 @@ class SpatioTemporalAttention(nn.Module):
         self.qkv_projection = nn.Linear(model_dim, model_dim * 3)
         self.output = nn.Linear(model_dim, model_dim)
 
-    def forward(self, Q, K, V, mask=None):
+    def forward(self, Q, K, V, mask=None, is_causal=False):
         attn_mask = None
         dropout_p = self.dropout_p if self.training else 0.0
         
@@ -127,7 +127,8 @@ class SpatioTemporalAttention(nn.Module):
             atten_output = F.scaled_dot_product_attention(
                 q, k, v, 
                 attn_mask=attn_mask, 
-                dropout_p=dropout_p
+                dropout_p=dropout_p,
+                is_causal=is_causal
             )
 
             # [B, S, J, D]
@@ -188,7 +189,7 @@ class SpatioTemporalAttention(nn.Module):
                     # [B, S] -> [B, 1, H, L, S]
                     attn_mask = mask[:, None, None, None, :]      # (B, 1, 1, 1, S)
                     attn_mask = attn_mask.expand(-1, 1, self.num_heads, text_seq_len, -1)
-
+            
             atten_output = F.scaled_dot_product_attention(
                 q, k, v, 
                 attn_mask=attn_mask, 
@@ -385,10 +386,5 @@ class JointAggregator(nn.Module):
         
         # Reshape queries back to [B, S, K, D]
         queries = queries.view(batch_size, seq_len, self.num_queries, model_dim)
-        aggregated = queries.flatten(1, 2).contiguous()  # [B, S * K, D]
 
-        mask_out = None
-        if mask is not None:
-            mask_out = mask.unsqueeze(-1).expand(-1, -1, self.num_queries).reshape(batch_size, -1).contiguous()  # [B, S * K]
-
-        return aggregated, mask_out
+        return queries, mask
