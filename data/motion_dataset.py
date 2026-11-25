@@ -34,7 +34,7 @@ class MotionDataset(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
         self.tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
-        self.mean_std = os.path.exists("train_mean_std.npz")
+        self.mean_std = os.path.exists("./data/train_mean_std.npz")
 
         # path of the text descripions and motions directory
         # .../text/
