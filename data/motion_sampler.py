@@ -40,16 +40,20 @@ class MotionSampler(Sampler):
         return self._num_batches
     
     def __iter__(self):
-        batches = []
+        batches, leftovers = [], []
         for bucket in self.buckets:
             indices = list(bucket)
             if self.shuffle:
                 rd.shuffle(indices)
-            for i in range(0, len(indices), self.batch_size):
-                batch = indices[i:i + self.batch_size]
-                if self.drop_last and len(batch) < self.batch_size:
-                    continue
-                batches.append(batch)
+            full = len(indices) // self.batch_size * self.batch_size
+            batches += [indices[i:i + self.batch_size] for i in range(0, full, self.batch_size)]
+            leftovers += indices[full:]
+            
+        for i in range(0, len(indices), self.batch_size):
+            batch = leftovers[i:i + self.batch_size]
+            if not self.drop_last or len(batch) == self.batch_size:
+                continue
+            batches.append(batch)
 
         if self.shuffle:
             rd.shuffle(batches)

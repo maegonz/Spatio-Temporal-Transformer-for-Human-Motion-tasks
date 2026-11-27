@@ -167,7 +167,7 @@ def validation(model: nn.Module,
     for item in val_loader:
         motion = item['motion'].to(device, non_blocking=True)
         encoder_attn_mask = item['attn_mask'].to(device, non_blocking=True)
-        captions = item['captions']
+        references = item['references']
         labels = item['input_ids'].to(device, non_blocking=True)
         decoder_input = labels_shift(labels, pad_id)
         B = motion.size(0)
@@ -187,7 +187,7 @@ def validation(model: nn.Module,
 
         # metrics
         texts = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        all_references.extend(captions)
+        all_references.extend(references)
         all_generated.extend(texts)
 
     metrics_scores = evaluator.compute_metrics(all_references, all_generated)

@@ -8,115 +8,171 @@ from pathlib import Path
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer
 from typing import Optional
+from collections import defaultdict
 
-# directories containing text descriptions and motion files
-text_dir = './data/texts/'  # directory containing all .txt description files
-motion_dir = './data/motions/'  # directory containing all .npy motion files
+FPS = 20            # HumanML3D (KIT-ML: 12.5)
+MIN_LEN, MAX_KEEP, CROP_LEN = 40, 200, 196
 
 class MotionDataset(Dataset):
     def __init__(self,
-                 file: str = "train",
-                 text_dir: str = text_dir,
-                 motion_dir: str = motion_dir,
+                 split: str = "train",
+                 text_dir: str = './data/texts/',
+                 motion_dir: str = './data/motions/',
                  tokenizer_name: str = 't5-small',
+                 max_tokens: int = 64,
                  mean: Optional[np.ndarray] = None,
-                 std: Optional[np.ndarray] = None):
+                 std: Optional[np.ndarray] = None,
+                 mean_std_path: str = "./data/train_mean_std.npz"):
         """
         Params
         -------
-        file : str
-            File containing the list of data samples to be used.
-            "val", "train" or "test". Defaults to "train".
+        split : str, optional
+            Dataset split to load: ``"train"``, ``"val"``, or ``"test"``.
+            Defaults to ``"train"``.
+        text_dir : str, optional
+            Directory containing the text description files.
+        motion_dir : str, optional
+            Directory containing the NumPy motion files.
+        tokenizer_name : str, optional
+            Hugging Face tokenizer name or path used for captions.
+        mean : np.ndarray, optional
+            Motion feature means used for normalization.
+        std : np.ndarray, optional
+            Motion feature standard deviations used for normalization.
+        mean_std_path : str, optional
+            Path to the ``.npz`` file containing training means and standard
+            deviations. If absent, statistics are computed for the training
+            split; validation and test splits require this file or supplied
+            statistics.
+
+        Attributes
+        ----------
+        split : str
+            Name of the dataset split (``"train"``, ``"val"``, or ``"test"``).
+        train : bool
+            Whether the dataset is the training split.
+        tokenizer : transformers.PreTrainedTokenizer
+            Tokenizer used to encode caption text.
+        samples : list[dict]
+            Loaded motion segments, captions, and tokenized captions.
+        mean : np.ndarray
+            Motion feature means used for normalization.
+        std : np.ndarray
+            Motion feature standard deviations used for normalization.
         """
 
-        assert file in ["train", "val", "test"], "file argument must be one of 'train', 'val', or 'test'"
-        self.file = file
+        assert split in ["train", "val", "test"], "file argument must be one of 'train', 'val', or 'test'"
+        self.split, self.train = split, split == "train"
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
         self.tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
 
-        self.mean_std = os.path.exists("./data/train_mean_std.npz")
+        # Read the motion identifiers assigned to this split
+        with open(os.path.join('./data/', f'{split}.txt'), 'r') as f:
+            names = set(f.read().splitlines())
 
-        # path of the text descripions and motions directory
-        # .../text/
-        # .../motions/
-        self.text_dir = text_dir
-        self.motion_dir = motion_dir
+        # Group captions by their annotated time range for each motion
+        self.samples, skipped = [], 0
+        for name in names:
+            m_path = os.path.join(motion_dir, f"{name}.npy")
+            t_path = os.path.join(text_dir, f"{name}.txt")
+            if not (os.path.exists(m_path) and os.path.exists(t_path)):
+                skipped += 1
+                continue
+            motion = np.load(m_path).astype(np.float32)           # (T, J, 3)
+            if not np.isfinite(motion).all():
+                skipped += 1
+                continue
 
-        with open(os.path.join('./data/', f'{file}.txt'), 'r') as f:
-            self.files_name = set(f.read().splitlines())
+            groups = defaultdict(list)                            # (start, end) -> captions
+            with open(t_path, encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split("#")
+                    cap = parts[0].strip()
 
-        # get sorted list of all text files and motion files
-        all_text = sorted(glob(os.path.join(text_dir, '*.txt')))
-        all_motion = sorted(glob(os.path.join(motion_dir, '*.npy')))
+                    # if cap empty = get the next one
+                    if not cap:
+                        continue
 
-        self.text_files = sorted([i for i in all_text if os.path.basename(i).split('.')[0] in self.files_name])
-        self.motion_files = sorted([i for i in all_motion if os.path.basename(i).split('.')[0] in self.files_name])
-        
-        self.motion_frames = []
-        for m in self.motion_files:
-            # mmap_mode='r' allows us to read the shape of the npy file without loading the entire file into memory
-            shape = np.load(m, mmap_mode='r').shape
-            self.motion_frames.append(shape[0])
+                    s = _as_float(parts[2]) if len(parts) > 2 else 0.0
+                    e = _as_float(parts[3]) if len(parts) > 3 else 0.0
+                    groups[(s, e)].append(cap)
+
+            for (s, e), caps in groups.items():
+                full = (s == 0.0 and e == 0.0)
+                seg = motion if full else motion[int(s * FPS):int(e * FPS)]
+                if not (MIN_LEN <= len(seg) < MAX_KEEP):
+                    continue
+                self.samples.append({
+                    "name": name if full else f"{name}_{s:.2f}_{e:.2f}",
+                    "motion": seg,
+                    "captions": caps,
+                    # Tokenize the text description
+                    "input_ids": self.tokenizer(caps, max_length=max_tokens,
+                                                truncation=True)["input_ids"],
+                })
+
+        print(f"{split} {len(self.samples)} samples, {skipped} motions skipped")
 
         # Normalisation
-        if file == "train":
-            if mean is None or std is None or not self.mean_std:
-                self.compute_mean_std()
-            elif (mean is None or std is None) and self.mean_std:
-                npzfile = np.load("./data/train_mean_std.npz")
-                self.mean = npzfile['x']
-                self.std = npzfile['y']
-            else:
-                self.mean = mean
-                self.std = std
+        if mean is not None or std is not None :
+            self.mean, self.std = mean, std
+        elif os.path.exists(mean_std_path):
+            npzfile = np.load(mean_std_path)
+            self.mean, self.std = npzfile['x'], npzfile['y']
+        elif self.train:
+            # Compute and save mean, std
+            self.mean, self.std = self._compute_mean_std()
+            np.savez(mean_std_path, x=self.mean, y=self.std)
         else:
-            # Load mean and std from train dataset
-            assert mean is not None and std is not None, "Mean and std must be provided for validation and test datasets."
-            self.mean = mean
-            self.std = std
+            raise ValueError("Validation and test set need train mean/std (pass them as argument or create the stats file)")
 
-    def compute_mean_std(self):
+    def _compute_mean_std(self):
+        # Accumulate feature sums across frames to compute normalization statistics
         sum_, sum_sq, count = 0, 0, 0
-        for m in self.motion_files:
-            motion = np.load(m)  # [T, J, 3]
-            sum_ += motion.sum(axis=0)        # [J, 3]
-            sum_sq += (motion ** 2).sum(axis=0) # [J, 3]
-            count += motion.shape[0]            # T
 
-        self.mean = sum_ / count
-        self.std = np.sqrt(sum_sq / count - (self.mean ** 2)) + 1e-8  # avoid division by zero
-        
-        if not self.mean_std:
-            np.savez("./data/train_mean_std.npz", x=self.mean, y=self.std)
+        for sample in self.samples:
+            motion = sample["motion"].astype(np.float64)  # [T, J, 3]
+            sum_ += motion.sum(axis=0)                    # [J, 3]
+            sum_sq += (motion ** 2).sum(axis=0)           # [J, 3]
+            count += motion.shape[0]                      # T
+
+        mean = sum_ / count
+        std = np.sqrt(sum_sq / count - (self.mean ** 2)) + 1e-8  # avoid division by zero
+        return mean.astype(np.float32), std.astype(np.float32)
+
+    @property
+    def frames(self):                     # for MotionSampler
+        return [min(len(s["motion"]), CROP_LEN) for s in self.samples]
 
     def __len__(self):
-        return len(self.files_name)
+        return len(self.samples)
     
     def __getitem__(self, idx):
         # read npy motion file
-        motion = np.load(self.motion_files[idx], mmap_mode='r')  # [T, J, 3]
+        sample = self.samples[idx]                               # [T, J, 3]
+        motion = sample["motion"]
+
+        # Crop long motions to a fixed length; randomize training crops only
+        if len(motion) > CROP_LEN:
+            start = rd.randint(0, len(motion) - CROP_LEN) if self.train else 0
+            motion = motion[start:start + CROP_LEN]
+
         motion = (motion - self.mean) / (self.std)               # normalize the motion data
-        motion = torch.from_numpy(motion.copy()).float()         # convert to torch tensor
+        motion = torch.from_numpy(motion).float()         # convert to torch tensor
+
+        k = rd.randrange(len(sample["captions"])) if self.train else 0
     
-        if self.file != "test":
-            # get the corresponding description for the associated motion
-            with open(self.text_files[idx], 'r', encoding='utf-8') as f:
-                descriptions = [
-                    caption.split('#')[0].capitalize() for caption in f.readlines()
-                ]
-            
-            #TODO: deal with multiple captions
-            text = rd.choice(descriptions)
+        return {
+            "motion": motion,
+            "input_ids": sample["input_ids"][k],  # shape: (1, seq_len)
+            # "captions": sample["captions"][k],
+            "references": sample["captions"],  # all captions for val & test
+            "name": sample["name"]
+        }
 
-            # Tokenize the text description
-            tokens = self.tokenizer(text, max_length=64, truncation=True, return_tensors=None)
-
-            return {
-                "motion": motion,
-                "captions": text,
-                "input_ids": tokens["input_ids"],  # shape: (1, seq_len)
-            }
-        else:
-            return {
-                "motion": motion,
-            }
+def _as_float(s: str):
+    try:
+        a = float(s)
+        return 0.0 if np.isnan(a) else a
+    except ValueError:
+        return 0.0
